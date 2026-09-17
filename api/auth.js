@@ -78,15 +78,8 @@ export default async function handler(req, res) {
         token
       });
     }
-    if (req.method === 'DELETE') {
-      await redis.del(KEY);
 
-      return res.status(200).json({
-        ok: true
-      });
-    }
-
-    res.setHeader('Allow', 'GET, POST, DELETE');
+    res.setHeader('Allow', 'GET, POST');
 
     return res.status(405).json({
       error: 'Method not allowed.'

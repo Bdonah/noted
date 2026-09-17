@@ -557,7 +557,6 @@
         <button class="tb-btn" id="tbBullet" title="Bulleted list">☰•</button>
         <button class="tb-btn" id="tbNumber" title="Numbered list">☰1</button>
         <button class="tb-btn" id="tbHeader" title="Toggle header on current line">H</button>
-        <button class="tb-btn" id="tbHistory" title="Past versions">🕘</button>
       </div>
       <div class="note-body" id="noteBody" contenteditable="true"></div>
       <div class="hint">Tip: press Enter twice to turn a line into a header</div>
