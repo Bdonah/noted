@@ -359,6 +359,7 @@ main.content{
 
 .toolbar{
   display:flex;
+  flex-wrap:wrap;
   gap:8px;
   margin-bottom:12px;
 }
@@ -374,6 +375,7 @@ main.content{
 }
 .tb-btn.tb-bold{font-weight:800;}
 .tb-btn.tb-italic{font-style:italic;}
+.tb-btn.tb-underline{text-decoration:underline;}
 
 .note-body{
   background:var(--surface);
@@ -399,6 +401,31 @@ main.content{
   margin:6px 0 2px;
   border-bottom:1px solid var(--border);
 }
+.note-body{
+  counter-reset: linenum;
+}
+.note-body .line-bullet{
+  position:relative;
+  padding-left:1.4em;
+}
+.note-body .line-bullet::before{
+  content:"•";
+  position:absolute;
+  left:0.2em;
+  color:var(--accent);
+}
+.note-body .line-number{
+  position:relative;
+  padding-left:1.6em;
+  counter-increment: linenum;
+}
+.note-body .line-number::before{
+  content: counter(linenum) ".";
+  position:absolute;
+  left:0;
+  color:var(--accent);
+  font-weight:600;
+}
 
 .hint{
   font-size:12px;
@@ -409,4 +436,75 @@ main.content{
 
 @media (min-width:600px){
   main.content{padding:28px;}
+}
+
+/* ---------- Confirm dialog ---------- */
+.btn-danger{
+  background:var(--danger);
+  border-color:var(--danger);
+  color:#fff;
+}
+.confirm-backdrop, .history-backdrop{
+  position:fixed; inset:0;
+  background:rgba(0,0,0,0.5);
+  display:flex; align-items:center; justify-content:center;
+  padding:20px;
+  z-index:20;
+}
+.confirm-card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:22px;
+  max-width:340px;
+  width:100%;
+  box-shadow:var(--shadow);
+}
+.confirm-message{
+  margin:0 0 18px;
+  font-size:15px;
+  line-height:1.5;
+}
+.confirm-actions{
+  display:flex;
+  gap:10px;
+  justify-content:flex-end;
+}
+
+/* ---------- History dialog ---------- */
+.history-card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:10px;
+  padding:22px;
+  max-width:420px;
+  width:100%;
+  max-height:80vh;
+  overflow-y:auto;
+  box-shadow:var(--shadow);
+}
+.history-title{
+  margin:0 0 14px;
+  font-size:18px;
+}
+.history-empty{
+  color:var(--text-2);
+  font-size:14px;
+}
+.history-row{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:10px 0;
+  border-bottom:1px solid var(--border);
+}
+.history-date{
+  font-size:13px;
+  font-weight:600;
+}
+.history-preview{
+  font-size:13px;
+  color:var(--text-2);
+  margin-top:2px;
 }

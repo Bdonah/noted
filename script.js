@@ -7,6 +7,8 @@
   let currentNoteId = null;
   let pendingDoubleEnter = false;
   let saveTimer = null;
+  let authToken = null; // in-memory only — a page reload always requires the password again
+  let editorEntryLines = null; // snapshot of the note's lines when the editor was opened
 
   const authScreen = document.getElementById('authScreen');
   const appEl = document.getElementById('app');
@@ -32,38 +34,60 @@
     return new Date(ts).toLocaleString(undefined, {month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit'});
   }
 
-  async function sha256Hex(str){
-    const enc = new TextEncoder();
-    const buf = await crypto.subtle.digest('SHA-256', enc.encode(str));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+  function deepCopy(obj){
+    return JSON.parse(JSON.stringify(obj));
   }
 
-  function randomSalt(){
-    const arr = new Uint8Array(16);
-    crypto.getRandomValues(arr);
-    return Array.from(arr).map(b => b.toString(16).padStart(2,'0')).join('');
+  // ---------- custom confirm dialog ----------
+  function showConfirm(message, confirmLabel, onConfirm){
+    const backdrop = document.createElement('div');
+    backdrop.className = 'confirm-backdrop';
+    backdrop.innerHTML = `
+      <div class="confirm-card">
+        <p class="confirm-message">${escapeHtml(message)}</p>
+        <div class="confirm-actions">
+          <button class="btn" id="confirmCancel">Cancel</button>
+          <button class="btn btn-danger" id="confirmOk">${escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    const close = () => backdrop.remove();
+    backdrop.addEventListener('click', e => { if(e.target === backdrop) close(); });
+    backdrop.querySelector('#confirmCancel').addEventListener('click', close);
+    backdrop.querySelector('#confirmOk').addEventListener('click', () => { close(); onConfirm(); });
   }
 
-  // ---------- data (backed by the shared database) ----------
-  async function loadData(){
-    try{
-      const res = await fetch('/api/notes');
-      if(!res.ok) throw new Error('load failed');
-      appData = await res.json();
-    }catch(e){
-      appData = { classes: [] };
-      throw e;
+  // ---------- backend calls ----------
+  async function apiFetch(url, options){
+    options = options || {};
+    const headers = Object.assign({}, options.headers || {});
+    if(authToken){
+      headers['Authorization'] = 'Bearer ' + authToken;
     }
+    const res = await fetch(url, Object.assign({}, options, {headers}));
+    if(res.status === 401){
+      authToken = null;
+      lockApp();
+      throw new Error('Not authenticated');
+    }
+    return res;
+  }
+
+  async function loadData(){
+    const res = await apiFetch('/api/notes');
+    if(!res.ok) throw new Error('load failed');
+    appData = await res.json();
   }
 
   async function saveData(){
     try{
-      await fetch('/api/notes', {
+      await apiFetch('/api/notes', {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(appData)
       });
-    }catch(e){ /* connection dropped; next edit will retry via scheduleSave */ }
+    }catch(e){ /* connection dropped or logged out; next save attempt will retry */ }
   }
 
   // ---------- theme (kept per-device; not shared) ----------
@@ -85,13 +109,7 @@
     document.documentElement.setAttribute('data-theme', next);
   }
 
-  // ---------- auth (stored server-side so it's the same password on every device) ----------
-  async function fetchAuth(){
-    const res = await fetch('/api/auth');
-    if(!res.ok) throw new Error('auth fetch failed');
-    return res.json();
-  }
-
+  // ---------- auth ----------
   function renderAuthLoading(){
     authScreen.innerHTML = `
       <div class="auth-card">
@@ -116,15 +134,18 @@
 
   async function renderAuthScreen(){
     renderAuthLoading();
-    let auth;
+    let exists;
     try{
-      auth = await fetchAuth();
+      const res = await fetch('/api/auth');
+      if(!res.ok) throw new Error('failed');
+      const data = await res.json();
+      exists = data.exists;
     }catch(e){
       renderAuthError();
       return;
     }
 
-    if(!auth){
+    if(!exists){
       authScreen.innerHTML = `
         <div class="auth-card">
           <div class="auth-mark">NOTED</div>
@@ -150,13 +171,11 @@
           err.textContent = "Passwords don't match.";
           return;
         }
-        const salt = randomSalt();
-        const hash = await sha256Hex(salt + p1);
         try{
           const res = await fetch('/api/auth', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({salt, hash})
+            body: JSON.stringify({password: p1})
           });
           if(res.status === 409){
             err.textContent = 'A password was just set from another device — enter it instead.';
@@ -164,6 +183,8 @@
             return;
           }
           if(!res.ok) throw new Error('save failed');
+          const data = await res.json();
+          authToken = data.token;
         }catch(e){
           err.textContent = "Couldn't save your password — check your connection.";
           return;
@@ -180,31 +201,32 @@
           <input class="text-input" type="password" id="loginPw" autocomplete="current-password">
           <div class="auth-error" id="authErr"></div>
           <button class="btn btn-primary" id="loginBtn">Unlock</button>
-          <button class="auth-reset" id="resetBtn">Forgot it? Reset all data everywhere</button>
         </div>
       `;
       const doLogin = async () => {
         const p1 = document.getElementById('loginPw').value;
         const err = document.getElementById('authErr');
-        const hash = await sha256Hex(auth.salt + p1);
-        if(hash === auth.hash){
-          unlockApp();
-        } else {
-          err.textContent = 'Wrong password.';
+        try{
+          const res = await fetch('/api/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({password: p1})
+          });
+          if(res.status === 401){
+            err.textContent = 'Wrong password.';
+            return;
+          }
+          if(!res.ok) throw new Error('login failed');
+          const data = await res.json();
+          authToken = data.token;
+        }catch(e){
+          err.textContent = "Couldn't reach the server — check your connection.";
+          return;
         }
+        unlockApp();
       };
       document.getElementById('loginBtn').addEventListener('click', doLogin);
       document.getElementById('loginPw').addEventListener('keydown', e => { if(e.key === 'Enter') doLogin(); });
-      document.getElementById('resetBtn').addEventListener('click', async () => {
-        if(confirm('This deletes your password AND every class and note, on every device. This cannot be undone. Continue?')){
-          try{
-            await fetch('/api/auth', {method: 'DELETE'});
-            await fetch('/api/notes', {method: 'DELETE'});
-          }catch(e){}
-          appData = { classes: [] };
-          renderAuthScreen();
-        }
-      });
     }
   }
 
@@ -230,6 +252,7 @@
   }
 
   function lockApp(){
+    authToken = null;
     view = 'list';
     currentNoteId = null;
     appEl.classList.add('hidden');
@@ -273,10 +296,98 @@
         renderApp();
       });
       tab.querySelector('.tab-name').addEventListener('dblclick', () => renameClass(tab.dataset.id));
+      attachTabDragHandlers(tab);
     });
     document.getElementById('addClassBtn').addEventListener('click', addClass);
   }
 
+  // ---------- drag to reorder tabs ----------
+  function attachTabDragHandlers(tabEl){
+    tabEl.addEventListener('pointerdown', (e) => {
+      if(e.target.dataset && e.target.dataset.del) return;
+      if(e.button !== undefined && e.button !== 0) return;
+
+      const startX = e.clientX, startY = e.clientY;
+      const pointerId = e.pointerId;
+
+      const cancelIntent = () => {
+        clearTimeout(pressTimer);
+        tabEl.removeEventListener('pointermove', onEarlyMove);
+        tabEl.removeEventListener('pointerup', cancelIntent);
+        tabEl.removeEventListener('pointercancel', cancelIntent);
+      };
+      const onEarlyMove = (ev) => {
+        if(Math.abs(ev.clientX - startX) > 10 || Math.abs(ev.clientY - startY) > 10){
+          cancelIntent();
+        }
+      };
+      const pressTimer = setTimeout(() => {
+        cancelIntent();
+        beginTabDrag(tabEl, pointerId);
+      }, 300);
+
+      tabEl.addEventListener('pointermove', onEarlyMove);
+      tabEl.addEventListener('pointerup', cancelIntent, {once: true});
+      tabEl.addEventListener('pointercancel', cancelIntent, {once: true});
+    });
+  }
+
+  function beginTabDrag(tabEl, pointerId){
+    try{ tabEl.setPointerCapture(pointerId); }catch(e){}
+    tabEl.classList.add('dragging');
+    tabsRow.style.touchAction = 'none';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (e) => {
+      if(e.pointerId !== pointerId) return;
+      const siblings = Array.from(tabsRow.querySelectorAll('.class-tab')).filter(t => t !== tabEl);
+      let insertBefore = null;
+      for(const t of siblings){
+        const rect = t.getBoundingClientRect();
+        if(e.clientX < rect.left + rect.width / 2){
+          insertBefore = t;
+          break;
+        }
+      }
+      if(insertBefore){
+        if(tabEl.nextSibling !== insertBefore){
+          tabsRow.insertBefore(tabEl, insertBefore);
+        }
+      } else {
+        const addBtn = document.getElementById('addClassBtn');
+        if(tabEl.nextSibling !== addBtn){
+          tabsRow.insertBefore(tabEl, addBtn);
+        }
+      }
+    };
+
+    const onUp = (e) => {
+      if(e.pointerId !== pointerId) return;
+      try{ tabEl.releasePointerCapture(pointerId); }catch(err){}
+      tabEl.classList.remove('dragging');
+      tabsRow.style.touchAction = '';
+      document.body.style.userSelect = '';
+      tabEl.removeEventListener('pointermove', onMove);
+      tabEl.removeEventListener('pointerup', onUp);
+      tabEl.removeEventListener('pointercancel', onUp);
+
+      // swallow the click the browser fires right after this drag ends
+      tabEl.addEventListener('click', function blockClick(ev){
+        ev.stopPropagation();
+        ev.preventDefault();
+        tabEl.removeEventListener('click', blockClick, true);
+      }, true);
+
+      const newOrderIds = Array.from(tabsRow.querySelectorAll('.class-tab')).map(el => el.dataset.id);
+      appData.classes.sort((a, b) => newOrderIds.indexOf(a.id) - newOrderIds.indexOf(b.id));
+      saveData();
+      renderTabs();
+    };
+
+    tabEl.addEventListener('pointermove', onMove);
+    tabEl.addEventListener('pointerup', onUp);
+    tabEl.addEventListener('pointercancel', onUp);
+  }
   function addClass(){
     const name = prompt('Class name:');
     if(!name || !name.trim()) return;
@@ -300,15 +411,16 @@
   function deleteClass(id){
     const c = appData.classes.find(x => x.id === id);
     if(!c) return;
-    if(!confirm(`Delete "${c.name}" and all its notes? This can't be undone.`)) return;
-    appData.classes = appData.classes.filter(x => x.id !== id);
-    if(selectedClassId === id){
-      selectedClassId = appData.classes.length ? appData.classes[0].id : null;
-    }
-    view = 'list';
-    currentNoteId = null;
-    saveData();
-    renderApp();
+    showConfirm(`Delete "${c.name}" and all its notes? This can't be undone.`, 'Delete class', () => {
+      appData.classes = appData.classes.filter(x => x.id !== id);
+      if(selectedClassId === id){
+        selectedClassId = appData.classes.length ? appData.classes[0].id : null;
+      }
+      view = 'list';
+      currentNoteId = null;
+      saveData();
+      renderApp();
+    });
   }
 
   function renderNotesList(){
@@ -377,7 +489,8 @@
       id: uid(),
       title: formatDate(Date.now()),
       createdAt: Date.now(),
-      lines: [{html: '', header: false}]
+      lines: [{html: '', header: false}],
+      history: []
     };
     cls.notes.push(note);
     saveData();
@@ -389,10 +502,11 @@
   function deleteNote(cls, noteId){
     const note = cls.notes.find(n => n.id === noteId);
     if(!note) return;
-    if(!confirm(`Delete "${note.title}"? This can't be undone.`)) return;
-    cls.notes = cls.notes.filter(n => n.id !== noteId);
-    saveData();
-    renderApp();
+    showConfirm(`Delete "${note.title}"? This can't be undone.`, 'Delete note', () => {
+      cls.notes = cls.notes.filter(n => n.id !== noteId);
+      saveData();
+      renderApp();
+    });
   }
 
   // ---------- editor ----------
@@ -402,6 +516,23 @@
     return cls.notes.find(n => n.id === currentNoteId) || null;
   }
 
+  function serializeEditorLines(){
+    const noteBody = document.getElementById('noteBody');
+    if(!noteBody) return null;
+    return Array.from(noteBody.querySelectorAll(':scope > .line')).map(div => ({
+      html: div.innerHTML === '<br>' ? '' : div.innerHTML,
+      header: div.classList.contains('line-header')
+    }));
+  }
+
+  function flushEditorToNote(){
+    const note = findNote();
+    const lines = serializeEditorLines();
+    if(note && lines){
+      note.lines = lines;
+    }
+  }
+
   function renderEditor(){
     const note = findNote();
     if(!note){
@@ -409,6 +540,9 @@
       renderApp();
       return;
     }
+    if(!note.history) note.history = [];
+    editorEntryLines = deepCopy(note.lines || []);
+
     content.innerHTML = `
       <div class="editor-topline">
         <button class="back-btn" id="backBtn">← Back</button>
@@ -418,13 +552,27 @@
       <div class="toolbar">
         <button class="tb-btn tb-bold" id="tbBold" title="Bold">B</button>
         <button class="tb-btn tb-italic" id="tbItalic" title="Italic">I</button>
+        <button class="tb-btn tb-underline" id="tbUnderline" title="Underline">U</button>
+        <button class="tb-btn" id="tbHighlight" title="Highlight">🖍️</button>
+        <button class="tb-btn" id="tbBullet" title="Bulleted list">☰•</button>
+        <button class="tb-btn" id="tbNumber" title="Numbered list">☰1</button>
         <button class="tb-btn" id="tbHeader" title="Toggle header on current line">H</button>
+        <button class="tb-btn" id="tbHistory" title="Past versions">🕘</button>
       </div>
       <div class="note-body" id="noteBody" contenteditable="true"></div>
       <div class="hint">Tip: press Enter twice to turn a line into a header</div>
     `;
 
     document.getElementById('backBtn').addEventListener('click', () => {
+      clearTimeout(saveTimer);
+      flushEditorToNote();
+      const changed = JSON.stringify(editorEntryLines) !== JSON.stringify(note.lines);
+      if(changed){
+        note.history = note.history || [];
+        note.history.unshift({ ts: Date.now(), lines: editorEntryLines });
+        if(note.history.length > 25) note.history.length = 25;
+      }
+      saveData();
       view = 'list';
       currentNoteId = null;
       renderApp();
@@ -443,19 +591,86 @@
 
     document.getElementById('tbBold').addEventListener('click', () => { noteBody.focus(); document.execCommand('bold'); scheduleSave(); });
     document.getElementById('tbItalic').addEventListener('click', () => { noteBody.focus(); document.execCommand('italic'); scheduleSave(); });
-    document.getElementById('tbHeader').addEventListener('click', () => {
-      const sel = window.getSelection();
-      if(!sel.rangeCount) return;
-      let node = sel.getRangeAt(0).startContainer;
-      while(node && !(node.nodeType === 1 && node.classList && node.classList.contains('line'))){
-        node = node.parentNode;
-      }
-      if(node) node.classList.toggle('line-header');
+    document.getElementById('tbUnderline').addEventListener('click', () => { noteBody.focus(); document.execCommand('underline'); scheduleSave(); });
+    document.getElementById('tbHighlight').addEventListener('click', () => {
+      noteBody.focus();
+      document.execCommand('styleWithCSS', false, true);
+      const worked = document.execCommand('hiliteColor', false, '#FDE68A');
+      if(!worked){ document.execCommand('backColor', false, '#FDE68A'); }
       scheduleSave();
+    });
+    document.getElementById('tbHeader').addEventListener('click', () => toggleLineStyle('line-header'));
+    document.getElementById('tbBullet').addEventListener('click', () => toggleLineStyle('line-bullet'));
+    document.getElementById('tbNumber').addEventListener('click', () => toggleLineStyle('line-number'));
+    document.getElementById('tbHistory').addEventListener('click', () => {
+      flushEditorToNote();
+      openHistoryModal(note);
     });
 
     noteBody.addEventListener('keydown', (e) => handleEditorKeydown(e, noteBody));
     noteBody.addEventListener('input', scheduleSave);
+  }
+
+  function openHistoryModal(note){
+    const hist = note.history || [];
+    const backdrop = document.createElement('div');
+    backdrop.className = 'history-backdrop';
+    backdrop.innerHTML = `
+      <div class="history-card">
+        <h3 class="history-title">Past versions</h3>
+        ${hist.length === 0
+          ? '<p class="history-empty">No past versions yet — they appear here once you edit this note and go back.</p>'
+          : hist.map((v, i) => `
+            <div class="history-row">
+              <div>
+                <div class="history-date">${formatDate(v.ts)}</div>
+                <div class="history-preview">${escapeHtml(stripHtml(v.lines[0] ? v.lines[0].html : '').slice(0,70)) || 'Empty'}</div>
+              </div>
+              <button class="btn" data-restore="${i}">Restore</button>
+            </div>
+          `).join('')
+        }
+        <button class="btn" id="historyClose" style="margin-top:12px;width:100%;">Close</button>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    backdrop.addEventListener('click', e => { if(e.target === backdrop) backdrop.remove(); });
+    backdrop.querySelector('#historyClose').addEventListener('click', () => backdrop.remove());
+    backdrop.querySelectorAll('[data-restore]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.restore);
+        const version = hist[idx];
+        backdrop.remove();
+        showConfirm('Restore this version? Your current text will be saved to history first.', 'Restore', () => {
+          const currentSnapshot = { ts: Date.now(), lines: deepCopy(note.lines) };
+          note.history = note.history || [];
+          note.history.unshift(currentSnapshot);
+          if(note.history.length > 25) note.history.length = 25;
+          note.lines = deepCopy(version.lines);
+          saveData();
+          renderEditor();
+        });
+      });
+    });
+  }
+
+  function getCurrentLine(){
+    const sel = window.getSelection();
+    if(!sel.rangeCount) return null;
+    let node = sel.getRangeAt(0).startContainer;
+    while(node && !(node.nodeType === 1 && node.classList && node.classList.contains('line'))){
+      node = node.parentNode;
+    }
+    return node;
+  }
+
+  function toggleLineStyle(className){
+    const node = getCurrentLine();
+    if(!node) return;
+    const hasIt = node.classList.contains(className);
+    node.classList.remove('line-header', 'line-bullet', 'line-number');
+    if(!hasIt) node.classList.add(className);
+    scheduleSave();
   }
 
   function buildEditorDOM(noteBody, lines){
@@ -503,6 +718,7 @@
       if(isEmpty && pendingDoubleEnter){
         const prevLine = currentLine.previousElementSibling;
         if(prevLine && prevLine.classList.contains('line') && prevLine.textContent.trim() !== ''){
+          prevLine.classList.remove('line-bullet', 'line-number');
           prevLine.classList.add('line-header');
         }
         pendingDoubleEnter = false;
@@ -529,15 +745,7 @@
   function scheduleSave(){
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      const note = findNote();
-      const noteBody = document.getElementById('noteBody');
-      if(note && noteBody){
-        const lines = Array.from(noteBody.querySelectorAll(':scope > .line')).map(div => ({
-          html: div.innerHTML === '<br>' ? '' : div.innerHTML,
-          header: div.classList.contains('line-header')
-        }));
-        note.lines = lines;
-      }
+      flushEditorToNote();
       saveData();
     }, 500);
   }
