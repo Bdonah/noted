@@ -27,7 +27,7 @@ export default async function handler(req, res) {
 
   try {
     // Does a password already exist?
-    if (req.method === 'DELETE') {
+    if (req.method === 'GET') {
       const raw = await redis.get(KEY);
 
       return res.status(200).json({
@@ -79,7 +79,7 @@ export default async function handler(req, res) {
       });
     }
 
-    res.setHeader('Allow', 'GET, POST, DELETE');
+    res.setHeader('Allow', 'GET, POST');
 
     return res.status(405).json({
       error: 'Method not allowed.'
